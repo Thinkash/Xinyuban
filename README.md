@@ -4,8 +4,8 @@ This project demonstrates a simple Retrieval-Augmented Generation (RAG) workflow
 
 ## Prerequisites
 
-- **Python 3.9 or higher** is required. (The current environment seems to be Python 3.6, which is too old for these libraries).
-- OpenAI API Key.
+- **Python 3.9 or higher** is required.
+- DeepSeek API Key.
 
 ## Setup
 
@@ -22,7 +22,11 @@ This project demonstrates a simple Retrieval-Augmented Generation (RAG) workflow
 
 3.  **Configure Environment Variables**:
     - Open `.env` file.
-    - Add your OpenAI API Key: `OPENAI_API_KEY=sk-...`
+    - Add your DeepSeek API Key and Base URL:
+      ```ini
+      DEEPSEEK_API_KEY=sk-...
+      DEEPSEEK_BASE_URL=https://api.deepseek.com
+      ```
 
 ## Running the Script
 
@@ -34,9 +38,9 @@ python rag_graph.py
 
 ## How it Works
 
-1.  **Vector Store**: Initializes a FAISS vector store with some dummy documents.
+1.  **Vector Store**: Initializes a FAISS vector store with some dummy documents, using local **HuggingFace Embeddings** (`all-MiniLM-L6-v2`) to avoid extra API costs.
 2.  **Graph State**: Maintains the conversation history (`messages`) and retrieved context (`context`).
 3.  **Nodes**:
     - `retrieve`: Searches the vector store for relevant information based on the user's query.
-    - `generate`: Uses GPT-3.5 to answer the question using the retrieved context.
+    - `generate`: Uses **DeepSeek** model to answer the question using the retrieved context.
 4.  **Workflow**: The graph defines the flow: Start -> Retrieve -> Generate -> End.
