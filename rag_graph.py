@@ -1,6 +1,9 @@
 import os
+import zipfile
+import xml.etree.ElementTree as ET
 from typing import Annotated, List, TypedDict, Union
 from dotenv import load_dotenv
+import pandas as pd
 
 # LangChain imports
 from langchain_openai import ChatOpenAI
@@ -21,21 +24,121 @@ load_dotenv()
 if not os.getenv("DEEPSEEK_API_KEY"):
     print("Warning: DEEPSEEK_API_KEY not found in environment variables. Please set it in .env file.")
 
-# --- 1. Setup Mock Vector Store (RAG) ---
-# In a real application, you would ingest real documents (PDFs, text files, etc.)
-print("Initializing Vector Store...")
-dummy_documents = [
-    Document(page_content="LangGraph is a library for building stateful, multi-actor applications with LLMs, built on top of LangChain."),
-    Document(page_content="LangChain is a framework for developing applications powered by language models. It enables applications that are context-aware and reason."),
-    Document(page_content="Retrieval-Augmented Generation (RAG) is a technique for enhancing the accuracy and reliability of generative AI models with facts fetched from external sources."),
-    Document(page_content="The user is asking for a python script using langchain and langgraph."),
-]
+# --- 1. Setup Vector Store (RAG) ---
+def load_documents_from_directory(directory_path):
+    documents = []
+    if not os.path.exists(directory_path):
+        print(f"Directory not found: {directory_path}")
+        return documents
+        
+    for filename in os.listdir(directory_path):
+        # Skip temporary files
+        if filename.startswith("~$"):
+            continue
+            
+        file_path = os.path.join(directory_path, filename)
+        if filename.endswith(('.xlsx', '.xls')):
+            try:
+                df = pd.read_excel(file_path)
+                # Convert each row to a document
+                for index, row in df.iterrows():
+                    # Combine all columns into text content
+                    content = "\n".join([f"{col}: {val}" for col, val in row.items() if pd.notna(val)])
+                    documents.append(Document(page_content=content, metadata={"source": filename, "row": index}))
+                print(f"Loaded {len(df)} rows from {filename}")
+            except Exception as e:
+                print(f"Error loading Excel file {filename}: {e}")
+        elif filename.endswith('.txt'):
+            content = None
+            # Try different encodings
+            encodings = ['utf-8', 'gb18030', 'gbk', 'utf-16']
+            
+            for encoding in encodings:
+                try:
+                    with open(file_path, 'r', encoding=encoding) as f:
+                        content = f.read()
+                    print(f"Loaded text file {filename} (using {encoding})")
+                    break
+                except UnicodeDecodeError:
+                    continue
+                except Exception as e:
+                    print(f"Error loading text file {filename} with {encoding}: {e}")
+                    break
+            
+            # If all strict encodings fail, try with error ignoring
+            if content is None:
+                try:
+                    print(f"Warning: Could not decode {filename} with standard encodings. Trying to ignore errors...")
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    print(f"Loaded text file {filename} (with errors ignored)")
+                except Exception as e:
+                    print(f"Failed to load text file {filename}: {e}")
 
+            if content:
+                documents.append(Document(page_content=content, metadata={"source": filename}))
+        elif filename.endswith('.docx'):
+            try:
+                from docx import Document as DocxDocument
+                doc = DocxDocument(file_path)
+                content = "\n".join([para.text for para in doc.paragraphs])
+                documents.append(Document(page_content=content, metadata={"source": filename}))
+                print(f"Loaded Word document {filename}")
+            except Exception as e:
+                print(f"Standard load failed for {filename}, trying fallback...")
+                try:
+                    # Fallback: Try to read word/document.xml directly from zip
+                    with zipfile.ZipFile(file_path) as z:
+                        xml_content = z.read('word/document.xml')
+                        tree = ET.fromstring(xml_content)
+                        # Simple text extraction from XML
+                        text_parts = []
+                        for node in tree.iter():
+                            if node.tag.endswith('}t'): # Text node
+                                if node.text:
+                                    text_parts.append(node.text)
+                            elif node.tag.endswith('}p'): # Paragraph end
+                                text_parts.append('\n')
+                        content = "".join(text_parts).strip()
+                        if content:
+                            documents.append(Document(page_content=content, metadata={"source": filename}))
+                            print(f"Loaded Word document {filename} (fallback)")
+                        else:
+                            print(f"Fallback loaded empty content for {filename}")
+                except Exception as e2:
+                    print(f"Error loading Word file {filename}: {e} | Fallback error: {e2}")
+    return documents
+
+print("Initializing Vector Store...")
 # Initialize Embeddings
-# Note: Using HuggingFaceEmbeddings for local execution to avoid OpenAI dependency for embeddings.
 try:
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    vector_store = FAISS.from_documents(dummy_documents, embeddings)
+    vector_store_path = "faiss_index"
+
+    if os.path.exists(vector_store_path):
+        print(f"Loading existing vector store from {vector_store_path}...")
+        # allow_dangerous_deserialization is needed for local files in newer langchain versions
+        vector_store = FAISS.load_local(vector_store_path, embeddings, allow_dangerous_deserialization=True)
+    else:
+        print("Index not found. Loading documents and creating new vector store...")
+        # Load documents from data directories
+        knowledge_base_docs = load_documents_from_directory(os.path.join("data", "knowledge_base"))
+        cases_docs = load_documents_from_directory(os.path.join("data", "cases"))
+        all_documents = knowledge_base_docs + cases_docs
+
+        if not all_documents:
+            print("No documents found in data directories. Using dummy data for testing.")
+            all_documents = [
+                Document(page_content="LangGraph is a library for building stateful, multi-actor applications with LLMs, built on top of LangChain."),
+                Document(page_content="LangChain is a framework for developing applications powered by language models. It enables applications that are context-aware and reason."),
+                Document(page_content="Retrieval-Augmented Generation (RAG) is a technique for enhancing the accuracy and reliability of generative AI models with facts fetched from external sources."),
+                Document(page_content="The user is asking for a python script using langchain and langgraph."),
+            ]
+        
+        vector_store = FAISS.from_documents(all_documents, embeddings)
+        vector_store.save_local(vector_store_path)
+        print(f"Vector store created and saved to {vector_store_path}")
+
     retriever = vector_store.as_retriever(search_kwargs={"k": 2})
 except Exception as e:
     print(f"Error initializing vector store: {e}")
@@ -75,9 +178,26 @@ def generate_node(state: AgentState):
     messages = state['messages']
     context = state['context']
     
+    # Read system prompt from file
+    system_prompt_path = os.path.join("prompts", "system_prompt.txt")
+    default_prompt = "You are a helpful assistant. Use the following context to answer the user's question.\n\nContext:\n{context}"
+    
+    if os.path.exists(system_prompt_path):
+        try:
+            with open(system_prompt_path, "r", encoding="utf-8") as f:
+                system_prompt_text = f.read()
+            # Ensure {context} placeholder exists so RAG works
+            if "{context}" not in system_prompt_text:
+                system_prompt_text += "\n\n相关上下文:\n{context}"
+        except Exception as e:
+            print(f"Error reading system prompt file: {e}")
+            system_prompt_text = default_prompt
+    else:
+        system_prompt_text = default_prompt
+
     # Define the prompt template
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a helpful assistant. Use the following context to answer the user's question. If the answer is not in the context, say you don't know.\n\nContext:\n{context}"),
+        ("system", system_prompt_text),
         ("placeholder", "{messages}"),
     ])
     
@@ -115,26 +235,30 @@ app = workflow.compile()
 
 # --- 5. Execution (Main) ---
 if __name__ == "__main__":
-    print("\n--- Starting RAG Conversation Flow ---\n")
+    print("\n--- 心理咨询助手已启动 (输入 'quit' 或 'exit' 退出) ---\n")
     
-    # Example Query
-    user_query = "What is LangGraph used for?"
-    print(f"User: {user_query}")
-    
-    # Initial State
-    initial_state = {
-        "messages": [HumanMessage(content=user_query)],
-        "context": ""
-    }
-    
-    try:
-        # Stream the graph execution
-        for output in app.stream(initial_state):
-            for key, value in output.items():
-                # print(f"Finished node: {key}")
-                if key == "generate":
-                    last_msg = value["messages"][-1]
-                    print(f"\nAssistant: {last_msg.content}\n")
-    except Exception as e:
-        print(f"\nError running graph: {e}")
-        print("Ensure you have set DEEPSEEK_API_KEY in .env and installed requirements.")
+    while True:
+        user_query = input("User: ")
+        if user_query.lower() in ["quit", "exit"]:
+            print("Goodbye!")
+            break
+            
+        if not user_query.strip():
+            continue
+
+        # Initial State
+        initial_state = {
+            "messages": [HumanMessage(content=user_query)],
+            "context": ""
+        }
+        
+        try:
+            # Stream the graph execution
+            for output in app.stream(initial_state):
+                for key, value in output.items():
+                    if key == "generate":
+                        last_msg = value["messages"][-1]
+                        print(f"\nAssistant: {last_msg.content}\n")
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            print("Ensure you have set DEEPSEEK_API_KEY in .env and installed requirements.")
