@@ -1,5 +1,6 @@
 import os
 import zipfile
+import json
 import xml.etree.ElementTree as ET
 from typing import Annotated, List, TypedDict, Union
 from dotenv import load_dotenv
@@ -9,6 +10,7 @@ import pandas as pd
 from langchain_openai import ChatOpenAI
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -107,39 +109,87 @@ def load_documents_from_directory(directory_path):
                             print(f"Fallback loaded empty content for {filename}")
                 except Exception as e2:
                     print(f"Error loading Word file {filename}: {e} | Fallback error: {e2}")
+        elif filename.endswith('.json'):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                # Handle PsyQA format (list of dicts)
+                if isinstance(data, list):
+                    count = 0
+                    for item in data:
+                        # Extract basic fields
+                        question = item.get("question", "")
+                        description = item.get("description", "")
+                        keywords = item.get("keywords", "")
+                        
+                        # Extract answers
+                        answers = item.get("answers", [])
+                        answer_texts = []
+                        for ans in answers:
+                            if isinstance(ans, dict) and "answer_text" in ans:
+                                answer_texts.append(ans["answer_text"])
+                        
+                        # Construct content block
+                        # Combining Question + Description + Answers into one context block
+                        content_parts = []
+                        if question: content_parts.append(f"问题: {question}")
+                        if description: content_parts.append(f"详细描述: {description}")
+                        if keywords: content_parts.append(f"关键词: {keywords}")
+                        if answer_texts: content_parts.append(f"专家回答: {' '.join(answer_texts)}")
+                        
+                        content = "\n".join(content_parts)
+                        
+                        if content:
+                            documents.append(Document(page_content=content, metadata={"source": filename}))
+                            count += 1
+                    print(f"Loaded {count} QA pairs from JSON file {filename}")
+                else:
+                    print(f"JSON structure not recognized for {filename} (expected a list)")
+            except Exception as e:
+                print(f"Error loading JSON file {filename}: {e}")
     return documents
 
 print("Initializing Vector Store...")
 # Initialize Embeddings
+# Switched to a better Chinese embedding model
 try:
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    embeddings = HuggingFaceEmbeddings(model_name="shibing624/text2vec-base-chinese")
     vector_store_path = "faiss_index"
 
     if os.path.exists(vector_store_path):
         print(f"Loading existing vector store from {vector_store_path}...")
-        # allow_dangerous_deserialization is needed for local files in newer langchain versions
         vector_store = FAISS.load_local(vector_store_path, embeddings, allow_dangerous_deserialization=True)
     else:
         print("Index not found. Loading documents and creating new vector store...")
         # Load documents from data directories
         knowledge_base_docs = load_documents_from_directory(os.path.join("data", "knowledge_base"))
         cases_docs = load_documents_from_directory(os.path.join("data", "cases"))
-        all_documents = knowledge_base_docs + cases_docs
+        raw_documents = knowledge_base_docs + cases_docs
 
-        if not all_documents:
+        if not raw_documents:
             print("No documents found in data directories. Using dummy data for testing.")
-            all_documents = [
+            raw_documents = [
                 Document(page_content="LangGraph is a library for building stateful, multi-actor applications with LLMs, built on top of LangChain."),
                 Document(page_content="LangChain is a framework for developing applications powered by language models. It enables applications that are context-aware and reason."),
                 Document(page_content="Retrieval-Augmented Generation (RAG) is a technique for enhancing the accuracy and reliability of generative AI models with facts fetched from external sources."),
                 Document(page_content="The user is asking for a python script using langchain and langgraph."),
             ]
         
+        # Split documents into chunks for better retrieval
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500,
+            chunk_overlap=50,
+            separators=["\n\n", "\n", "。", "！", "？", " ", ""]
+        )
+        all_documents = text_splitter.split_documents(raw_documents)
+        print(f"Splitting documents: {len(raw_documents)} raw docs -> {len(all_documents)} chunks")
+        
         vector_store = FAISS.from_documents(all_documents, embeddings)
         vector_store.save_local(vector_store_path)
         print(f"Vector store created and saved to {vector_store_path}")
 
-    retriever = vector_store.as_retriever(search_kwargs={"k": 2})
+    retriever = vector_store.as_retriever(search_kwargs={"k": 3})
 except Exception as e:
     print(f"Error initializing vector store: {e}")
     vector_store = None
@@ -168,6 +218,7 @@ def retrieve_node(state: AgentState):
         context = "No context available (Vector store not initialized)."
     
     print(f"Retrieved context length: {len(context)}")
+    # print(f"Retrieved context content:\n{context}\n--------------------")
     return {"context": context}
 
 def generate_node(state: AgentState):

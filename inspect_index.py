@@ -24,7 +24,7 @@ def inspect_vector_store():
     print(f"Loading vector store from '{index_path}'...")
     try:
         # Initialize Embeddings (Must match the one used to create the index in rag_graph.py)
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        embeddings = HuggingFaceEmbeddings(model_name="shibing624/text2vec-base-chinese")
         
         # Load the index
         # allow_dangerous_deserialization is required for loading local pickle files in newer langchain versions
