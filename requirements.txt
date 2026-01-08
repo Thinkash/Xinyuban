@@ -4,11 +4,9 @@ langchain-openai
 langchain-community
 faiss-cpu
 python-dotenv
-<<<<<<< HEAD
 pandas
 openpyxl
 python-docx
-=======
-langchain_huggingface
-sentence-transformers
->>>>>>> eb75957569c8db535bd6182b29bbaeb059fa321c
+fastapi
+uvicorn
+jinja2
